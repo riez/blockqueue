@@ -2,6 +2,7 @@ package blockqueue
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -138,13 +139,15 @@ func (d *db) createTxSubscribers(ctx context.Context, tx *sqlx.Tx, subscribers c
 }
 
 func (d *db) createMessages(ctx context.Context, message core.Message) error {
-	stmt, err := d.Database.Conn().PrepareNamedContext(ctx, "INSERT INTO topic_messages (id, topic_id, message, status) VALUES (:id, :topic_id, :message, :status)")
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	_, err = stmt.ExecContext(ctx, message)
+	// Use optimized direct SQL without prepared statements for single inserts
+	_, err := d.Database.Conn().ExecContext(
+		ctx,
+		"INSERT INTO topic_messages (id, topic_id, message, status) VALUES (?, ?, ?, ?)",
+		message.Id,
+		message.TopicId,
+		message.Message,
+		message.Status,
+	)
 	if err != nil {
 		return err
 	}
@@ -157,14 +160,48 @@ func (d *db) updateStatusMessage(ctx context.Context, status core.MessageStatus,
 		return nil
 	}
 
-	query, args, err := sqlx.In("UPDATE topic_messages SET status = ? WHERE id IN (?)", status, ids)
-	if err != nil {
+	// Adaptive batch sizing based on the number of updates
+	chunkSize := 50
+	if len(ids) < 25 {
+		// For small batches, don't chunk - faster at low concurrency
+		query, args, err := sqlx.In("UPDATE topic_messages SET status = ? WHERE id IN (?)", status, ids)
+		if err != nil {
+			return err
+		}
+
+		_, err = d.Database.Conn().ExecContext(ctx, d.Database.Conn().Rebind(query), args...)
 		return err
 	}
 
-	_, err = d.Database.Conn().ExecContext(ctx, d.Database.Conn().Rebind(query), args...)
-	if err != nil {
-		return err
+	// For larger batches, use appropriate chunk size
+	// Process in chunks to avoid timeouts
+	for i := 0; i < len(ids); i += chunkSize {
+		end := i + chunkSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+
+		// Create a new context for each chunk for better timeout management
+		// Use shorter timeouts for smaller chunks
+		chunkTimeout := 500 * time.Millisecond
+		if end-i > 25 {
+			chunkTimeout = 750 * time.Millisecond
+		}
+
+		chunkCtx, cancel := context.WithTimeout(context.Background(), chunkTimeout)
+
+		query, args, err := sqlx.In("UPDATE topic_messages SET status = ? WHERE id IN (?)", status, ids[i:end])
+		if err != nil {
+			cancel()
+			return err
+		}
+
+		_, err = d.Database.Conn().ExecContext(chunkCtx, d.Database.Conn().Rebind(query), args...)
+		cancel()
+
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -172,8 +209,8 @@ func (d *db) updateStatusMessage(ctx context.Context, status core.MessageStatus,
 
 func (d *db) getMessages(ctx context.Context, filter core.FilterMessage) (core.Messages, error) {
 	var (
-		messages = make(core.Messages, 0)
-		query    = "SELECT * FROM topic_messages"
+		messages = make(core.Messages, 0, filter.Limit)                       // Pre-allocate capacity
+		query    = "SELECT id, topic_id, message, status FROM topic_messages" // Only select needed columns
 	)
 
 	clause, arg := filter.Filter("AND")
