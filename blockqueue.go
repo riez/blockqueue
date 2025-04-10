@@ -188,7 +188,6 @@ func (q *BlockQueue[V]) publish(ctx context.Context, topic core.Topic, request b
 	// Pre-generate UUID to avoid overhead
 	messageID := uuid.New()
 
-	// Create a more efficient message object - helps at low concurrency
 	message := core.Message{
 		Id:      messageID,
 		TopicId: topic.Id,
@@ -280,7 +279,6 @@ func (q *BlockQueue[V]) getJob(topic core.Topic) (*Job[V], bool) {
 func (q *BlockQueue[V]) storeJob(name string, message []byte) error {
 	var request core.Message
 
-	// Use more efficient JSON unmarshaling
 	err := json.Unmarshal(message, &request)
 	if err != nil {
 		return err
