@@ -320,7 +320,6 @@ func (job *Job[V]) fetchWaitingJob() {
 }
 
 func (job *Job[V]) dispatchJob() error {
-	// Use adaptive timeout based on system load
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
@@ -354,13 +353,7 @@ func (job *Job[V]) dispatchJob() error {
 	}
 
 	if len(messages) > 0 {
-		// Use adaptive timeout for status updates too
-		updateTimeout := 1 * time.Second
-		if len(messages) < 50 {
-			updateTimeout = 500 * time.Millisecond // Faster for small batches
-		}
-
-		updateCtx, updateCancel := context.WithTimeout(context.Background(), updateTimeout)
+		updateCtx, updateCancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer updateCancel()
 
 		err = job.db.updateStatusMessage(updateCtx, core.MessageStatusDelivered, messages.Ids()...)
